@@ -17,7 +17,7 @@ describe('release task catalog', () => {
     expect(RELEASE_TASKS[1].workflow).toBe('cut-component-image.yml');
   });
   it('declares required inputs per task', () => {
-    expect(RELEASE_TASKS[0].required).toEqual(['mode', 'target_branch']);
+    expect(RELEASE_TASKS[0].required).toEqual(['mode', 'target_branch', 'source_repository', 'source_sha', 'release_line']);
     expect(RELEASE_TASKS[1].required).toEqual(['component', 'branch']);
   });
 });
@@ -32,8 +32,8 @@ describe('repo allowlist', () => {
 
 describe('validateInputs', () => {
   it('accepts declared inputs and coerces to strings', () => {
-    const out = validateInputs('release_bundle_run', { mode: 'query', target_branch: '0.8.7-stable', source_sha: 'a'.repeat(40) });
-    expect(out).toEqual({ mode: 'query', target_branch: '0.8.7-stable', source_sha: 'a'.repeat(40) });
+    const out = validateInputs('release_bundle_run', { mode: 'query', target_branch: '0.8.7-stable', source_repository: 'cisco-cdr', source_sha: 'a'.repeat(40), release_line: '0.8.7' });
+    expect(out).toEqual({ mode: 'query', target_branch: '0.8.7-stable', source_repository: 'cisco-cdr', source_sha: 'a'.repeat(40), release_line: '0.8.7' });
   });
   it('drops null values and rejects undeclared inputs', () => {
     expect(validateInputs('cut_component_image', { component: 'ct-media-go', branch: '0.8.7-stable', tag: null })).toEqual({ component: 'ct-media-go', branch: '0.8.7-stable' });

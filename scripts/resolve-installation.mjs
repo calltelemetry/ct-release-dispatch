@@ -4,29 +4,17 @@
  * installation whose account login matches the org. --verify does a full
  * round trip: mint an installation token and report its expiry.
  */
-const enc = new TextEncoder();
+import crypto from 'node:crypto';
 
-function pemBody(pem) {
-  const body = String(pem).replace(/-----BEGIN [^-]+-----/g, '').replace(/-----END [^-]+-----/g, '').replace(/\s+/g, '');
-  const raw = atob(body);
-  const bytes = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-  return bytes;
-}
-
-function base64url(bytes) {
-  let s = '';
-  for (const b of new Uint8Array(bytes)) s += String.fromCharCode(b);
-  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-async function appJwt(appId, pem) {
-  const header = base64url(enc.encode(JSON.stringify({ alg: 'RS256', typ: 'JWT' })));
+/** RS256 GitHub App JWT; node:crypto accepts PKCS#1 and PKCS#8 PEMs. */
+function appJwt(appId, pem) {
+  const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
   const now = Math.floor(Date.now() / 1000);
-  const payload = base64url(enc.encode(JSON.stringify({ iat: now - 60, exp: now + 540, iss: Number(appId) })));
-  const key = await crypto.subtle.importKey('pkcs8', pemBody(pem), { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign']);
-  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', key, enc.encode(`${header}.${payload}`));
-  return `${header}.${payload}.${base64url(sig)}`;
+  const payload = Buffer.from(JSON.stringify({ iat: now - 60, exp: now + 540, iss: Number(appId) })).toString('base64url');
+  const signer = crypto.createSign('RSA-SHA256');
+  signer.update(`${header}.${payload}`);
+  signer.end();
+  return `${header}.${payload}.${signer.sign(pem).toString('base64url')}`;
 }
 
 async function main() {

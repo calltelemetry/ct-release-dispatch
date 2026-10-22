@@ -37,6 +37,13 @@ fi
 [ -n "$APP_ID" ] || { echo "missing the release-automation App ID (set GH_APP_ID, or Doppler RELEASE_APP_ID in ai-workspace/dev)"; exit 1; }
 [ -n "$PEM_FILE" ] || { echo "missing the release-automation App private key PEM (set GH_APP_KEY_FILE=/path/to.pem, drop ./release-automation.pem, or Doppler RELEASE_APP_PRIVATE_KEY)"; exit 1; }
 
+# The worker uses WebCrypto, which requires PKCS#8; GitHub Apps export PKCS#1.
+if head -1 "$PEM_FILE" | grep -q "BEGIN RSA PRIVATE KEY"; then
+  normalized="$(mktemp -t release-app-pkcs8.XXXXXX.pem)"
+  openssl pkey -in "$PEM_FILE" -out "$normalized" 2>/dev/null
+  PEM_FILE="$normalized"
+fi
+
 echo "== resolving the installation id for app $APP_ID (org $ORG)"
 INSTALLATION_ID="$(node scripts/resolve-installation.mjs "$APP_ID" "$PEM_FILE" "$ORG")"
 [ -n "$INSTALLATION_ID" ] || { echo "could not resolve the installation id — check the App ID / PEM"; exit 1; }

@@ -21,7 +21,7 @@ export const RELEASE_TASKS = Object.freeze([
     workflow: 'release-bundle-rc.yml',
     repo: 'ct-release',
     inputs: ['mode', 'target_branch', 'source_repository', 'source_sha', 'release_line', 'version', 'train', 'alias_of', 'skip_component_releases', 'dispatch_ova'],
-    required: ['mode', 'target_branch'],
+    required: ['mode', 'target_branch', 'source_repository', 'source_sha', 'release_line'],
   },
   {
     name: 'cut_component_image',
@@ -65,9 +65,9 @@ async function installationToken(env: DispatchEnv, fetchImpl: typeof fetch): Pro
   const jwt = await appJwt(env.GH_APP_ID, env.GH_APP_PRIVATE_KEY);
   const response = await fetchImpl(`https://api.github.com/app/installations/${env.GH_INSTALLATION_ID}/access_tokens`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${jwt}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' },
+    headers: { Authorization: `Bearer ${jwt}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': 'ct-release-dispatch' },
   });
-  if (!response.ok) throw new Error(`installation token mint failed: ${response.status}`);
+  if (!response.ok) throw new Error(`installation token mint failed: ${response.status}: ${(await response.text().catch(() => ''))?.slice(0, 200)}`);
   const body = (await response.json()) as { token: string };
   return body.token;
 }
@@ -96,7 +96,7 @@ export async function dispatchReleaseTask(
   const dispatched_at = new Date().toISOString();
   const response = await fetchImpl(`https://api.github.com/repos/${repo}/actions/workflows/${task.workflow}/dispatches`, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'Content-Type': 'application/json', 'User-Agent': 'ct-release-dispatch' },
     body: JSON.stringify({ ref: 'main', inputs }),
   });
   if (response.status !== 204) throw new Error(`workflow dispatch failed: ${response.status} ${await response.text().catch(() => '')}`.slice(0, 300));
@@ -106,7 +106,7 @@ export async function dispatchReleaseTask(
     await new Promise((resolve) => setTimeout(resolve, 2000));
     const listResponse = await fetchImpl(
       `https://api.github.com/repos/${repo}/actions/workflows/${task.workflow}/runs?event=workflow_dispatch&per_page=5`,
-      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' } },
+      { headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'ct-release-dispatch' } },
     );
     if (!listResponse.ok) continue;
     const list = (await listResponse.json()) as { workflow_runs: Array<{ id: number; created_at: string; html_url: string }> };
