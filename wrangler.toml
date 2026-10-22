@@ -1,0 +1,8 @@
+name = "ct-release-dispatch"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+
+[vars]
+GITHUB_ORG = "calltelemetry"
+# The repos this worker may dispatch into; the GitHub App installation must cover exactly these.
+GITHUB_REPOS = "ct-release,cisco-cdr,ct-quasar,jtapi-sidecar,ct-media-go,ct-traceroute-go,ct-syslog-ingest-go,ct-pdf-renderer"
