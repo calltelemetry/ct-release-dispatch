@@ -2,8 +2,10 @@
 # Deploy ct-release-dispatch and wire its GitHub App secrets.
 #
 # Sources, in order of preference:
-#   1. Doppler ai-workspace/dev: RELEASE_APP_ID + RELEASE_APP_PRIVATE_KEY
-#   2. Environment: GH_APP_ID + a PEM file at $GH_APP_KEY_FILE (or ./release-automation.pem)
+#   1. Doppler ai-workspace/release-dispatch (the dedicated config): RELEASE_APP_ID
+#      + RELEASE_APP_PRIVATE_KEY (+ RELEASE_APP_INSTALLATION_ID, RELEASE_APP_SLUG)
+#   2. Doppler ai-workspace/dev (legacy names)
+#   3. Environment: GH_APP_ID + a PEM file at $GH_APP_KEY_FILE (or ./release-automation.pem)
 #
 # The installation id is RESOLVED automatically from the app credentials
 # (mint an app JWT -> GET /app/installations -> the calltelemetry org entry),
@@ -19,14 +21,15 @@ cd "$(dirname "$0")"
 : "${CLOUDFLARE_API_TOKEN:?export from Doppler ai-workspace/dev}"
 ORG="${GITHUB_ORG:-calltelemetry}"
 
-APP_ID="${GH_APP_ID:-$(doppler secrets get RELEASE_APP_ID --project ai-workspace --config dev --plain 2>/dev/null || true)}"
+DOPPLER_CONFIG="${DOPPLER_CONFIG:-release-dispatch}"
+APP_ID="${GH_APP_ID:-$(doppler secrets get RELEASE_APP_ID --project ai-workspace --config "$DOPPLER_CONFIG" --plain 2>/dev/null || doppler secrets get RELEASE_APP_ID --project ai-workspace --config dev --plain 2>/dev/null || true)}"
 PEM_FILE=""
 if [ -n "${GH_APP_KEY_FILE:-}" ] && [ -f "${GH_APP_KEY_FILE}" ]; then
   PEM_FILE="${GH_APP_KEY_FILE}"
 elif [ -f "./release-automation.pem" ]; then
   PEM_FILE="./release-automation.pem"
 else
-  APP_KEY="$(doppler secrets get RELEASE_APP_PRIVATE_KEY --project ai-workspace --config dev --plain 2>/dev/null || true)"
+  APP_KEY="$(doppler secrets get RELEASE_APP_PRIVATE_KEY --project ai-workspace --config "$DOPPLER_CONFIG" --plain 2>/dev/null || doppler secrets get RELEASE_APP_PRIVATE_KEY --project ai-workspace --config dev --plain 2>/dev/null || true)"
   if [ -n "$APP_KEY" ]; then
     PEM_FILE="$(mktemp -t release-app.XXXXXX.pem)"
     printf '%s\n' "$APP_KEY" > "$PEM_FILE"
