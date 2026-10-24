@@ -21,10 +21,34 @@ direction of 2026-10-22.
 
 The **release-automation GitHub App** (the same app the release workflows mint
 per-job tokens from). The worker holds `GH_APP_ID`, `GH_INSTALLATION_ID` and
-`GH_APP_PRIVATE_KEY` as wrangler secrets; a fresh installation token
-(`actions:write`, short TTL) is minted per call via the RS256 app JWT and never
-cached or logged. The repo allowlist in `wrangler.toml` (`GITHUB_REPOS`) is the
-cross-repo boundary — the tools refuse anything outside it.
+`GH_APP_PRIVATE_KEY` as wrangler secrets, and the MCP endpoint is gated by the
+`MCP_TOKEN` bearer secret (fail-closed when unset).
+
+### Installation-token cache (UAT-1815 / K3 audit)
+
+Installation tokens (`actions:write`, GitHub TTL ~1h) used to be minted per
+call — a fresh RS256 app JWT plus a token round-trip on every tool invocation.
+They are now cached **by installation id** for their ~55-minute usable life:
+
+- refresh at **50 minutes** (`INSTALLATION_TOKEN_REFRESH_MS`) so a cached token
+  always has runway left;
+- the Workers KV entry lives **55 minutes** (`INSTALLATION_TOKEN_KV_TTL_SECONDS`)
+  as a backstop — the freshness check is what forces the re-mint;
+- a GitHub **401** (rotated installation, revocation, clock drift) drops every
+  cached copy and re-mints exactly once, then retries the dispatch;
+- the **in-isolate cache is the floor**: with no `TOKEN_CACHE` binding (or when
+  KV errors), consecutive calls in one isolate still reuse the token, and a
+  dispatch never depends on the cache being available.
+
+Optional KV binding (tokens then survive isolate eviction across PoPs):
+
+```bash
+npx wrangler kv namespace create RELEASE_TOKEN_CACHE
+# then uncomment the [[kv_namespaces]] block in wrangler.toml with the printed id
+```
+
+The repo allowlist in `wrangler.toml` (`GITHUB_REPOS`) is the cross-repo
+boundary — the tools refuse anything outside it.
 
 ## Deploy
 
@@ -32,6 +56,7 @@ cross-repo boundary — the tools refuse anything outside it.
 npx wrangler secret put GH_APP_ID
 npx wrangler secret put GH_INSTALLATION_ID
 npx wrangler secret put GH_APP_PRIVATE_KEY   # the release-automation App PEM
+npx wrangler secret put MCP_TOKEN            # bearer gate for the MCP endpoint
 npx wrangler deploy
 ```
 
@@ -42,5 +67,6 @@ every repo listed in `GITHUB_REPOS` — the app's installed permission set
 ## Test
 
 ```bash
-npx vitest run
+npx vitest run        # worker contract tests, including the token cache and the bearer gate
+npx tsc --noEmit      # typecheck (local devDependency)
 ```
