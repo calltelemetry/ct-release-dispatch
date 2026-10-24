@@ -60,4 +60,9 @@ printf '%s' "$APP_ID" | npx wrangler secret put GH_APP_ID
 printf '%s' "$INSTALLATION_ID" | npx wrangler secret put GH_INSTALLATION_ID
 npx wrangler secret put GH_APP_PRIVATE_KEY < "$PEM_FILE"
 
+# Gate the MCP endpoint itself (K3 audit: unauthenticated endpoint + wildcard CORS).
+MCP_TOKEN="$(doppler secrets get MCP_TOKEN --project ai-workspace --config "$DOPPLER_CONFIG" --plain 2>/dev/null || true)"
+[ -n "$MCP_TOKEN" ] || { echo "FAIL: MCP_TOKEN missing in doppler://ai-workspace/$DOPPLER_CONFIG" >&2; exit 1; }
+printf '%s' "$MCP_TOKEN" | npx wrangler secret put MCP_TOKEN
+
 echo "deployed and secrets wired."

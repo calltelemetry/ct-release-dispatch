@@ -12,6 +12,8 @@ export interface DispatchEnv {
   GH_APP_ID: string;
   GH_INSTALLATION_ID: string;
   GH_APP_PRIVATE_KEY: string;
+  /** Shared bearer token gating the MCP endpoint (Doppler ai-workspace/release-dispatch/MCP_TOKEN). */
+  MCP_TOKEN?: string;
 }
 
 export const RELEASE_TASKS = Object.freeze([
