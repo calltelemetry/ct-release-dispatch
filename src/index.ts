@@ -5,9 +5,12 @@
  * exposure — the tools are the direct surface, matching qualification_run's
  * direct-only guard.
  *
- * Auth: the release-automation GitHub App. A fresh installation token is minted
- * per call (RS256 app JWT → installation access token, actions:write) and never
- * cached or logged. The dispatch allowlist in wrangler vars is the repo boundary.
+ * Auth: the release-automation GitHub App behind the MCP_TOKEN bearer gate.
+ * Installation tokens (RS256 app JWT → installation access token,
+ * actions:write) are cached by installation id for their ~55-minute usable
+ * lifetime — Workers KV under the TOKEN_CACHE binding, the in-isolate cache as
+ * the floor — and re-minted on a 401; they are never logged. The dispatch
+ * allowlist in wrangler vars is the repo boundary.
  */
 import { RELEASE_TASKS, dispatchReleaseTask, validateInputs, type DispatchEnv } from './github.js';
 
