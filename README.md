@@ -16,6 +16,10 @@ direction of 2026-10-22.
 
 `release_bundle_run` with `mode=dispatch` is operator-gated: it requires
 `confirm="DISPATCH"` in the call so a stale or replayed request cannot cut.
+`confirm` is a declared (non-required) input of the tool — dispatch mode
+validates its value, the query/dry-run modes ignore it. Before UAT-1815 rc99 it
+was not declared, so the gate passed and `validateInputs` then rejected `confirm`
+as an unknown input: the worker could not execute its own gated dispatch.
 
 ## Auth
 
