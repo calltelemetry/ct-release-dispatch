@@ -5,20 +5,36 @@
  * exposure — the tools are the direct surface, matching qualification_run's
  * direct-only guard.
  *
- * Auth: the release-automation GitHub App. A fresh installation token is minted
- * per call (RS256 app JWT → installation access token, actions:write) and never
- * cached or logged. The dispatch allowlist in wrangler vars is the repo boundary.
+ * Auth: the release-automation GitHub App behind the MCP_TOKEN bearer gate.
+ * Installation tokens (RS256 app JWT → installation access token,
+ * actions:write) are cached by installation id for their ~55-minute usable
+ * lifetime — Workers KV under the TOKEN_CACHE binding, the in-isolate cache as
+ * the floor — and re-minted on a 401; they are never logged. The dispatch
+ * allowlist in wrangler vars is the repo boundary.
  */
 import { RELEASE_TASKS, dispatchReleaseTask, validateInputs, type DispatchEnv } from './github.js';
 
 export const SERVER_NAME = 'ct-release-dispatch';
 export const SERVER_VERSION = '1.0.0';
 
+// Direct-only MCP over a bearer token (K3 audit finding 6: the endpoint was
+// unauthenticated with wildcard CORS — anyone with the URL could mint GitHub
+// runs). No browser client exists, so no Access-Control-Allow-Origin is sent.
 const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Accept, Authorization, Mcp-Method, Mcp-Name, MCP-Protocol-Version, x-ct-agent',
 };
+
+/** Constant-time bearer check against env.MCP_TOKEN (Doppler ai-workspace/release-dispatch). */
+function authorized(request: Request, env: DispatchEnv): boolean {
+  const expected = (env.MCP_TOKEN ?? '').trim();
+  if (!expected) return false; // fail closed when unset
+  const got = (request.headers.get('Authorization') ?? '').replace(/^Bearer\s+/i, '').trim();
+  if (got.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected.charCodeAt(i) ^ got.charCodeAt(i);
+  return diff === 0;
+}
 
 function jsonResponse(status: number, data: unknown): Response {
   return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
@@ -45,6 +61,11 @@ function jsonRpcError(id: unknown, code: number, message: string): Response {
 export default {
   async fetch(request: Request, env: DispatchEnv): Promise<Response> {
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
+
+    if (!authorized(request, env)) {
+      return new Response(JSON.stringify({ error: 'unauthorized: supply Authorization: Bearer <MCP_TOKEN>' }),
+        { status: 401, headers: { 'Content-Type': 'application/json', ...CORS_HEADERS } });
+    }
 
     if (request.method === 'GET') {
       return jsonResponse(200, {

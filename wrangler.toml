@@ -6,3 +6,13 @@ compatibility_date = "2025-06-01"
 GITHUB_ORG = "calltelemetry"
 # The repos this worker may dispatch into; the GitHub App installation must cover exactly these.
 GITHUB_REPOS = "ct-release,cisco-cdr,ct-quasar,jtapi-sidecar,ct-media-go,ct-traceroute-go,ct-syslog-ingest-go,ct-pdf-renderer"
+
+# Installation-token cache (UAT-1815 / K3 audit): tokens are cached by installation
+# id for their ~55-minute usable lifetime instead of being minted per call. The
+# binding is optional — with it, the cache survives isolate eviction across
+# PoPs; without it the worker falls back to the in-isolate cache. To enable KV:
+#   npx wrangler kv namespace create RELEASE_TOKEN_CACHE
+# then uncomment the block and paste the printed id.
+# [[kv_namespaces]]
+# binding = "TOKEN_CACHE"
+# id = "<RELEASE_TOKEN_CACHE namespace id>"
