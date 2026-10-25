@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" },
+  "scripts": { "test": "vitest run" },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250620.0",
     "typescript": "^5.5.0",

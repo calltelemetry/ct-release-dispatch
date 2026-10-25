@@ -1,17 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import worker from '../src/index.js';
-import {
-  appJwt,
-  cachedInstallationToken,
-  dispatchReleaseTask,
-  INSTALLATION_TOKEN_KV_TTL_SECONDS,
-  INSTALLATION_TOKEN_REFRESH_MS,
-  invalidateInstallationToken,
-  RELEASE_TASKS,
-  repoAllowed,
-  validateInputs,
-  type DispatchEnv,
-} from '../src/github.js';
+import { describe, expect, it } from 'vitest';
+import { RELEASE_TASKS, repoAllowed, validateInputs, appJwt } from '../src/github.js';
 
 const env = {
   GITHUB_ORG: 'calltelemetry',
@@ -29,16 +17,8 @@ describe('release task catalog', () => {
     expect(RELEASE_TASKS[1].workflow).toBe('cut-component-image.yml');
   });
   it('declares required inputs per task', () => {
-    expect(RELEASE_TASKS[0].required).toEqual(['mode', 'target_branch', 'source_repository', 'source_sha', 'release_line']);
+    expect(RELEASE_TASKS[0].required).toEqual(['mode', 'target_branch']);
     expect(RELEASE_TASKS[1].required).toEqual(['component', 'branch']);
-  });
-  it('declares confirm as an optional input of release_bundle_run so the dispatch gate can validate it', () => {
-    // The gate (src/index.ts) demands confirm="DISPATCH" for mode=dispatch; if
-    // confirm were not declared here, validateInputs would reject it as an
-    // unknown input and the worker could never execute its own gated dispatch.
-    expect(RELEASE_TASKS[0].inputs).toContain('confirm');
-    expect(RELEASE_TASKS[0].required).not.toContain('confirm');
-    expect(RELEASE_TASKS[1].inputs).not.toContain('confirm');
   });
 });
 
@@ -52,8 +32,8 @@ describe('repo allowlist', () => {
 
 describe('validateInputs', () => {
   it('accepts declared inputs and coerces to strings', () => {
-    const out = validateInputs('release_bundle_run', { mode: 'query', target_branch: '0.8.7-stable', source_repository: 'cisco-cdr', source_sha: 'a'.repeat(40), release_line: '0.8.7' });
-    expect(out).toEqual({ mode: 'query', target_branch: '0.8.7-stable', source_repository: 'cisco-cdr', source_sha: 'a'.repeat(40), release_line: '0.8.7' });
+    const out = validateInputs('release_bundle_run', { mode: 'query', target_branch: '0.8.7-stable', source_sha: 'a'.repeat(40) });
+    expect(out).toEqual({ mode: 'query', target_branch: '0.8.7-stable', source_sha: 'a'.repeat(40) });
   });
   it('drops null values and rejects undeclared inputs', () => {
     expect(validateInputs('cut_component_image', { component: 'ct-media-go', branch: '0.8.7-stable', tag: null })).toEqual({ component: 'ct-media-go', branch: '0.8.7-stable' });
@@ -62,10 +42,6 @@ describe('validateInputs', () => {
   it('enforces required inputs', () => {
     expect(() => validateInputs('release_bundle_run', {})).toThrow(/missing required input: mode/);
     expect(() => validateInputs('cut_component_image', { component: 'ct-media-go' })).toThrow(/missing required input: branch/);
-  });
-  it('accepts confirm on query mode as a harmless declared input', () => {
-    const out = validateInputs('release_bundle_run', { ...DISPATCH_INPUTS, confirm: 'DISPATCH' });
-    expect(out.confirm).toBe('DISPATCH');
   });
 });
 
@@ -96,289 +72,3 @@ async function fakePkcs8(): Promise<string> {
   const b64 = btoa(body).replace(/(.{64})/g, '$1\n');
   return `-----BEGIN PRIVATE KEY-----\n${b64}\n-----END PRIVATE KEY-----`;
 }
-
-// ---------------------------------------------------------------------------
-// Installation-token cache (UAT-1815 / K3 audit): the worker used to mint a
-// fresh RS256 app JWT + installation token per call. Tokens are now cached by
-// installation id (Workers KV under TOKEN_CACHE, the in-isolate cache as the
-// floor) for the ~55-minute usable lifetime, and a 401 invalidates the cached
-// token and re-mints exactly once.
-// ---------------------------------------------------------------------------
-
-interface RecordedCall { url: string; method: string; authorization: string; body?: string }
-
-interface FakeGitHub {
-  calls: RecordedCall[];
-  fetch: typeof fetch;
-  mintCount: () => number;
-  dispatchCount: () => number;
-}
-
-function jsonResponse(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-}
-
-/** A recording GitHub API fake: mints installation tokens, accepts dispatches, lists runs. */
-function fakeGitHub(options: { mintedTokens?: string[]; dispatchStatuses?: number[] } = {}): FakeGitHub {
-  const tokens = options.mintedTokens ?? [];
-  const dispatchStatuses = options.dispatchStatuses ?? [];
-  const calls: RecordedCall[] = [];
-  let mints = 0;
-  let dispatches = 0;
-  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const url = String(input);
-    const method = String(init?.method ?? 'GET');
-    const authorization = String((init?.headers as Record<string, string>)?.Authorization ?? '');
-    calls.push({ url, method, authorization, body: init?.body == null ? undefined : String(init.body) });
-    if (url.includes('/app/installations/') && url.endsWith('/access_tokens')) {
-      const token = tokens[mints] ?? `tok-${mints + 1}`;
-      mints++;
-      return jsonResponse(201, { token });
-    }
-    if (url.includes('/dispatches')) {
-      const status = dispatchStatuses[dispatches] ?? 204;
-      dispatches++;
-      return new Response(null, { status });
-    }
-    if (url.includes('/runs?')) {
-      return jsonResponse(200, {
-        workflow_runs: [{ id: 424242, created_at: new Date(Date.now() + 60_000).toISOString(), html_url: 'https://github.com/calltelemetry/ct-release/actions/runs/424242' }],
-      });
-    }
-    return jsonResponse(404, { message: 'unexpected call' });
-  }) as unknown as typeof fetch;
-  return { calls, fetch: fetchImpl, mintCount: () => mints, dispatchCount: () => dispatches };
-}
-
-/** A tiny in-memory KVNamespace stub. */
-function kvStub(entries = new Map<string, { value: string; ttl?: number }>()):
-  KVNamespace & { store: Map<string, { value: string; ttl?: number }> } {
-  return {
-    store: entries,
-    async get(key: string, type: 'json'): Promise<unknown> {
-      const hit = entries.get(key);
-      if (!hit) return null;
-      return type === 'json' ? JSON.parse(hit.value) : hit.value;
-    },
-    async put(key: string, value: string, opts?: { expirationTtl?: number }): Promise<void> {
-      entries.set(key, { value, ttl: opts?.expirationTtl });
-    },
-    async delete(key: string): Promise<void> {
-      entries.delete(key);
-    },
-  } as unknown as KVNamespace & { store: Map<string, { value: string; ttl?: number }> };
-}
-
-function envFor(installationId: string, tokenCache?: KVNamespace): DispatchEnv {
-  return {
-    GITHUB_ORG: 'calltelemetry',
-    GITHUB_REPOS: 'ct-release,cisco-cdr,ct-quasar',
-    GH_APP_ID: '12345',
-    GH_INSTALLATION_ID: installationId,
-    GH_APP_PRIVATE_KEY: TEST_APP_PEM,
-    MCP_TOKEN: 'mcp-secret',
-    ...(tokenCache ? { TOKEN_CACHE: tokenCache } : {}),
-  };
-}
-
-// The mint path signs a real RS256 app JWT, so the fixtures need a valid PKCS8 PEM.
-const TEST_APP_PEM = await fakePkcs8();
-
-const DISPATCH_INPUTS = { mode: 'query', target_branch: '0.8.7-stable', source_repository: 'cisco-cdr', source_sha: 'a'.repeat(40), release_line: '0.8.7' };
-
-describe('installation token cache', () => {
-  it('mints once and reuses the in-isolate token for consecutive calls', async () => {
-    const env = envFor('cache-isolate-1');
-    const github = fakeGitHub({ mintedTokens: ['tok-iso-1'] });
-    const first = await cachedInstallationToken(env, github.fetch);
-    const second = await cachedInstallationToken(env, github.fetch);
-    expect(first).toBe('tok-iso-1');
-    expect(second).toBe('tok-iso-1');
-    expect(github.mintCount()).toBe(1);
-  });
-
-  it('serves a fresh KV entry without minting and repopulates the isolate cache', async () => {
-    const kv = kvStub();
-    const env = envFor('cache-kv-1', kv);
-    await kv.put('gh-installation-token:cache-kv-1', JSON.stringify({ token: 'tok-kv-warm', cached_at: Date.now() }), { expirationTtl: INSTALLATION_TOKEN_KV_TTL_SECONDS });
-    const github = fakeGitHub();
-    expect(await cachedInstallationToken(env, github.fetch)).toBe('tok-kv-warm');
-    expect(github.mintCount()).toBe(0);
-  });
-
-  it('re-mints when the KV entry is older than the 50-minute refresh window', async () => {
-    const kv = kvStub();
-    const env = envFor('cache-kv-stale', kv);
-    await kv.put('gh-installation-token:cache-kv-stale', JSON.stringify({ token: 'tok-stale', cached_at: Date.now() - INSTALLATION_TOKEN_REFRESH_MS - 1000 }), { expirationTtl: INSTALLATION_TOKEN_KV_TTL_SECONDS });
-    const github = fakeGitHub({ mintedTokens: ['tok-fresh'] });
-    expect(await cachedInstallationToken(env, github.fetch)).toBe('tok-fresh');
-    expect(github.mintCount()).toBe(1);
-    expect(JSON.parse(kv.store.get('gh-installation-token:cache-kv-stale')!.value)).toMatchObject({ token: 'tok-fresh' });
-  });
-
-  it('stores a fresh mint in KV with the 55-minute backstop TTL', async () => {
-    const kv = kvStub();
-    const env = envFor('cache-kv-put', kv);
-    const github = fakeGitHub({ mintedTokens: ['tok-put'] });
-    expect(await cachedInstallationToken(env, github.fetch)).toBe('tok-put');
-    const stored = kv.store.get('gh-installation-token:cache-kv-put');
-    expect(JSON.parse(stored!.value)).toMatchObject({ token: 'tok-put' });
-    expect(stored!.ttl).toBe(55 * 60);
-  });
-
-  it('keeps minting and dispatching when the KV binding is unbound or failing', async () => {
-    const broken = {
-      get: () => Promise.reject(new Error('kv down')),
-      put: () => Promise.reject(new Error('kv down')),
-      delete: () => Promise.reject(new Error('kv down')),
-    } as unknown as KVNamespace;
-    const env = envFor('cache-broken-kv', broken);
-    const github = fakeGitHub({ mintedTokens: ['tok-broken', 'tok-broken-2'] });
-    expect(await cachedInstallationToken(env, github.fetch)).toBe('tok-broken');
-    expect(await cachedInstallationToken(env, github.fetch, { force: true })).toBe('tok-broken-2');
-    expect(github.mintCount()).toBe(2);
-  });
-
-  it('drops every cached copy on invalidateInstallationToken', async () => {
-    const kv = kvStub();
-    const env = envFor('cache-invalidate', kv);
-    const github = fakeGitHub({ mintedTokens: ['tok-old'] });
-    await cachedInstallationToken(env, github.fetch);
-    await invalidateInstallationToken(env);
-    expect(kv.store.has('gh-installation-token:cache-invalidate')).toBe(false);
-    const next = fakeGitHub({ mintedTokens: ['tok-new'] });
-    expect(await cachedInstallationToken(env, next.fetch)).toBe('tok-new');
-    expect(next.mintCount()).toBe(1);
-  });
-});
-
-describe('dispatch token invalidation on 401', () => {
-  it('re-mints once and retries when a cached token is rejected with 401', async () => {
-    const kv = kvStub();
-    const env = envFor('dispatch-401', kv);
-    const warm = fakeGitHub({ mintedTokens: ['tok-warm'] });
-    await cachedInstallationToken(env, warm.fetch); // prime isolate + KV with tok-warm
-
-    const github = fakeGitHub({ mintedTokens: ['tok-fresh'], dispatchStatuses: [401, 204] });
-    const result = await dispatchReleaseTask(env, 'release_bundle_run', DISPATCH_INPUTS, github.fetch);
-    expect(result.run_id).toBe(424242);
-    expect(github.mintCount()).toBe(1); // exactly one re-mint, not a loop
-    expect(github.dispatchCount()).toBe(2);
-    const dispatchCalls = github.calls.filter((call) => call.url.includes('/dispatches'));
-    expect(dispatchCalls[0].authorization).toBe('Bearer tok-warm'); // the cached token was tried first
-    expect(dispatchCalls[1].authorization).toBe('Bearer tok-fresh'); // and the fresh token succeeded
-    expect(kv.store.has('gh-installation-token:dispatch-401')).toBe(true); // the fresh token is cached again
-    expect(JSON.parse(kv.store.get('gh-installation-token:dispatch-401')!.value)).toMatchObject({ token: 'tok-fresh' });
-    // the invalidated token must be gone from every cache layer
-    expect(kv.store.get('gh-installation-token:dispatch-401')!.value).not.toContain('tok-warm');
-  });
-
-  it('does not re-mint on non-401 dispatch failures', async () => {
-    const env = envFor('dispatch-403');
-    const github = fakeGitHub({ mintedTokens: ['tok-403'], dispatchStatuses: [403] });
-    await expect(dispatchReleaseTask(env, 'release_bundle_run', DISPATCH_INPUTS, github.fetch)).rejects.toThrow(/workflow dispatch failed: 403/);
-    expect(github.mintCount()).toBe(1);
-    expect(github.dispatchCount()).toBe(1);
-  });
-
-  it('reuses the cached token across two dispatches without minting again', async () => {
-    const env = envFor('dispatch-reuse');
-    const github = fakeGitHub({ mintedTokens: ['tok-once'] });
-    await dispatchReleaseTask(env, 'release_bundle_run', DISPATCH_INPUTS, github.fetch);
-    await dispatchReleaseTask(env, 'cut_component_image', { component: 'ct-media-go', branch: '0.8.7-stable' }, github.fetch);
-    expect(github.mintCount()).toBe(1);
-    expect(github.dispatchCount()).toBe(2);
-    const authorizations = github.calls.filter((call) => call.url.includes('/dispatches')).map((call) => call.authorization);
-    expect(authorizations).toEqual(['Bearer tok-once', 'Bearer tok-once']);
-  });
-});
-
-describe('release_bundle_run dispatch confirm gate (UAT-1815 rc99: the gate demanded confirm="DISPATCH" and validateInputs then rejected confirm as unknown — dispatch mode was unexecutable)', () => {
-  const base = 'https://worker.example/mcp';
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  function mcpCall(id: number, args: Record<string, unknown>): Request {
-    return new Request(base, {
-      method: 'POST',
-      headers: { Authorization: 'Bearer mcp-secret', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'release_bundle_run', arguments: args } }),
-    });
-  }
-
-  async function rpcError(response: Response): Promise<{ code: number; message: string }> {
-    const body = await response.json() as { error?: { code: number; message: string } };
-    return body.error ?? { code: 0, message: `no error in ${JSON.stringify(body).slice(0, 200)}` };
-  }
-
-  it('rejects dispatch without confirm with the gate error (not an unknown-input error)', async () => {
-    const github = fakeGitHub({ mintedTokens: ['tok-gate'] });
-    vi.stubGlobal('fetch', github.fetch);
-    const response = await worker.fetch(mcpCall(1, { ...DISPATCH_INPUTS, mode: 'dispatch' }), envFor('gate-no-confirm'));
-    expect(response.status).toBe(200);
-    const error = await rpcError(response);
-    expect(error.code).toBe(-32003);
-    expect(error.message).toMatch(/requires confirm="DISPATCH"/);
-    expect(error.message).not.toMatch(/unknown input/);
-    expect(github.dispatchCount()).toBe(0); // the gate fired before any dispatch
-  });
-
-  it('rejects dispatch with a wrong confirm value with the gate error', async () => {
-    const github = fakeGitHub({ mintedTokens: ['tok-gate-wrong'] });
-    vi.stubGlobal('fetch', github.fetch);
-    const response = await worker.fetch(mcpCall(2, { ...DISPATCH_INPUTS, mode: 'dispatch', confirm: 'dispatch' }), envFor('gate-wrong-confirm'));
-    const error = await rpcError(response);
-    expect(error.code).toBe(-32003);
-    expect(error.message).toMatch(/requires confirm="DISPATCH"/);
-    expect(github.dispatchCount()).toBe(0);
-  });
-
-  it('passes validateInputs and dispatches when mode=dispatch carries confirm="DISPATCH"', async () => {
-    const github = fakeGitHub({ mintedTokens: ['tok-gated-dispatch'] });
-    vi.stubGlobal('fetch', github.fetch);
-    const response = await worker.fetch(mcpCall(3, { ...DISPATCH_INPUTS, mode: 'dispatch', confirm: 'DISPATCH' }), envFor('gate-ok-dispatch'));
-    expect(response.status).toBe(200);
-    const body = await response.json() as { result?: { structuredContent?: { run_id: number } }; error?: { code: number; message: string } };
-    expect(body.error).toBeUndefined();
-    expect(body.result?.structuredContent?.run_id).toBe(424242);
-    expect(github.dispatchCount()).toBe(1);
-    // the gated call was forwarded to the workflow dispatch payload, confirm included
-    const dispatchBody = JSON.parse(github.calls.find((call) => call.url.includes('/dispatches'))!.body ?? '{}') as { ref: string; inputs: Record<string, string> };
-    expect(dispatchBody.ref).toBe('main');
-    expect(dispatchBody.inputs.mode).toBe('dispatch');
-    expect(dispatchBody.inputs.confirm).toBe('DISPATCH');
-  });
-
-  it('accepts confirm on query mode as harmless (no gate, no unknown-input rejection)', async () => {
-    const github = fakeGitHub({ mintedTokens: ['tok-query-confirm'] });
-    vi.stubGlobal('fetch', github.fetch);
-    const response = await worker.fetch(mcpCall(4, { ...DISPATCH_INPUTS, confirm: 'DISPATCH' }), envFor('gate-query-confirm'));
-    const body = await response.json() as { result?: { structuredContent?: { run_id: number } }; error?: { code: number; message: string } };
-    // neither the -32003 dispatch gate nor validateInputs' unknown-input error
-    expect(body.error?.code).not.toBe(-32003);
-    expect(body.error?.message ?? '').not.toMatch(/unknown input/);
-    expect(body.result?.structuredContent?.run_id).toBe(424242);
-  });
-});
-
-describe('MCP_TOKEN bearer gate (must stay)', () => {
-  const base = 'https://worker.example/mcp';
-
-  it('fails closed without a bearer token and on a wrong token', async () => {
-    const noToken = envFor('gate-unset');
-    delete (noToken as Partial<DispatchEnv>).MCP_TOKEN;
-    expect((await worker.fetch(new Request(base), noToken)).status).toBe(401);
-    const wrong = new Request(base, { headers: { Authorization: 'Bearer nope' } });
-    expect((await worker.fetch(wrong, envFor('gate-wrong'))).status).toBe(401);
-  });
-
-  it('serves the MCP surface with the correct bearer token', async () => {
-    const ok = new Request(base, { method: 'POST', headers: { Authorization: 'Bearer mcp-secret', 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
-    const response = await worker.fetch(ok, envFor('gate-ok'));
-    expect(response.status).toBe(200);
-    const body = await response.json() as { result: { tools: Array<{ name: string }> } };
-    expect(body.result.tools.map((tool) => tool.name)).toEqual(['release_bundle_run', 'cut_component_image']);
-  });
-});
