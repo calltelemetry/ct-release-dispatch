@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index.js';
 import {
   appJwt,
@@ -32,6 +32,14 @@ describe('release task catalog', () => {
     expect(RELEASE_TASKS[0].required).toEqual(['mode', 'target_branch', 'source_repository', 'source_sha', 'release_line']);
     expect(RELEASE_TASKS[1].required).toEqual(['component', 'branch']);
   });
+  it('declares confirm as an optional input of release_bundle_run so the dispatch gate can validate it', () => {
+    // The gate (src/index.ts) demands confirm="DISPATCH" for mode=dispatch; if
+    // confirm were not declared here, validateInputs would reject it as an
+    // unknown input and the worker could never execute its own gated dispatch.
+    expect(RELEASE_TASKS[0].inputs).toContain('confirm');
+    expect(RELEASE_TASKS[0].required).not.toContain('confirm');
+    expect(RELEASE_TASKS[1].inputs).not.toContain('confirm');
+  });
 });
 
 describe('repo allowlist', () => {
@@ -54,6 +62,10 @@ describe('validateInputs', () => {
   it('enforces required inputs', () => {
     expect(() => validateInputs('release_bundle_run', {})).toThrow(/missing required input: mode/);
     expect(() => validateInputs('cut_component_image', { component: 'ct-media-go' })).toThrow(/missing required input: branch/);
+  });
+  it('accepts confirm on query mode as a harmless declared input', () => {
+    const out = validateInputs('release_bundle_run', { ...DISPATCH_INPUTS, confirm: 'DISPATCH' });
+    expect(out.confirm).toBe('DISPATCH');
   });
 });
 
@@ -93,7 +105,7 @@ async function fakePkcs8(): Promise<string> {
 // token and re-mints exactly once.
 // ---------------------------------------------------------------------------
 
-interface RecordedCall { url: string; method: string; authorization: string }
+interface RecordedCall { url: string; method: string; authorization: string; body?: string }
 
 interface FakeGitHub {
   calls: RecordedCall[];
@@ -117,7 +129,7 @@ function fakeGitHub(options: { mintedTokens?: string[]; dispatchStatuses?: numbe
     const url = String(input);
     const method = String(init?.method ?? 'GET');
     const authorization = String((init?.headers as Record<string, string>)?.Authorization ?? '');
-    calls.push({ url, method, authorization });
+    calls.push({ url, method, authorization, body: init?.body == null ? undefined : String(init.body) });
     if (url.includes('/app/installations/') && url.endsWith('/access_tokens')) {
       const token = tokens[mints] ?? `tok-${mints + 1}`;
       mints++;
@@ -278,6 +290,76 @@ describe('dispatch token invalidation on 401', () => {
     expect(github.dispatchCount()).toBe(2);
     const authorizations = github.calls.filter((call) => call.url.includes('/dispatches')).map((call) => call.authorization);
     expect(authorizations).toEqual(['Bearer tok-once', 'Bearer tok-once']);
+  });
+});
+
+describe('release_bundle_run dispatch confirm gate (UAT-1815 rc99: the gate demanded confirm="DISPATCH" and validateInputs then rejected confirm as unknown — dispatch mode was unexecutable)', () => {
+  const base = 'https://worker.example/mcp';
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function mcpCall(id: number, args: Record<string, unknown>): Request {
+    return new Request(base, {
+      method: 'POST',
+      headers: { Authorization: 'Bearer mcp-secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'release_bundle_run', arguments: args } }),
+    });
+  }
+
+  async function rpcError(response: Response): Promise<{ code: number; message: string }> {
+    const body = await response.json() as { error?: { code: number; message: string } };
+    return body.error ?? { code: 0, message: `no error in ${JSON.stringify(body).slice(0, 200)}` };
+  }
+
+  it('rejects dispatch without confirm with the gate error (not an unknown-input error)', async () => {
+    const github = fakeGitHub({ mintedTokens: ['tok-gate'] });
+    vi.stubGlobal('fetch', github.fetch);
+    const response = await worker.fetch(mcpCall(1, { ...DISPATCH_INPUTS, mode: 'dispatch' }), envFor('gate-no-confirm'));
+    expect(response.status).toBe(200);
+    const error = await rpcError(response);
+    expect(error.code).toBe(-32003);
+    expect(error.message).toMatch(/requires confirm="DISPATCH"/);
+    expect(error.message).not.toMatch(/unknown input/);
+    expect(github.dispatchCount()).toBe(0); // the gate fired before any dispatch
+  });
+
+  it('rejects dispatch with a wrong confirm value with the gate error', async () => {
+    const github = fakeGitHub({ mintedTokens: ['tok-gate-wrong'] });
+    vi.stubGlobal('fetch', github.fetch);
+    const response = await worker.fetch(mcpCall(2, { ...DISPATCH_INPUTS, mode: 'dispatch', confirm: 'dispatch' }), envFor('gate-wrong-confirm'));
+    const error = await rpcError(response);
+    expect(error.code).toBe(-32003);
+    expect(error.message).toMatch(/requires confirm="DISPATCH"/);
+    expect(github.dispatchCount()).toBe(0);
+  });
+
+  it('passes validateInputs and dispatches when mode=dispatch carries confirm="DISPATCH"', async () => {
+    const github = fakeGitHub({ mintedTokens: ['tok-gated-dispatch'] });
+    vi.stubGlobal('fetch', github.fetch);
+    const response = await worker.fetch(mcpCall(3, { ...DISPATCH_INPUTS, mode: 'dispatch', confirm: 'DISPATCH' }), envFor('gate-ok-dispatch'));
+    expect(response.status).toBe(200);
+    const body = await response.json() as { result?: { structuredContent?: { run_id: number } }; error?: { code: number; message: string } };
+    expect(body.error).toBeUndefined();
+    expect(body.result?.structuredContent?.run_id).toBe(424242);
+    expect(github.dispatchCount()).toBe(1);
+    // the gated call was forwarded to the workflow dispatch payload, confirm included
+    const dispatchBody = JSON.parse(github.calls.find((call) => call.url.includes('/dispatches'))!.body ?? '{}') as { ref: string; inputs: Record<string, string> };
+    expect(dispatchBody.ref).toBe('main');
+    expect(dispatchBody.inputs.mode).toBe('dispatch');
+    expect(dispatchBody.inputs.confirm).toBe('DISPATCH');
+  });
+
+  it('accepts confirm on query mode as harmless (no gate, no unknown-input rejection)', async () => {
+    const github = fakeGitHub({ mintedTokens: ['tok-query-confirm'] });
+    vi.stubGlobal('fetch', github.fetch);
+    const response = await worker.fetch(mcpCall(4, { ...DISPATCH_INPUTS, confirm: 'DISPATCH' }), envFor('gate-query-confirm'));
+    const body = await response.json() as { result?: { structuredContent?: { run_id: number } }; error?: { code: number; message: string } };
+    // neither the -32003 dispatch gate nor validateInputs' unknown-input error
+    expect(body.error?.code).not.toBe(-32003);
+    expect(body.error?.message ?? '').not.toMatch(/unknown input/);
+    expect(body.result?.structuredContent?.run_id).toBe(424242);
   });
 });
 

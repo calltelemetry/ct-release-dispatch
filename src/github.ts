@@ -31,7 +31,11 @@ export const RELEASE_TASKS = Object.freeze([
     description: 'The isolated RC bundle task: query the release-plan schema, dry-run it, or dispatch unified-release.yml from the plan receipt and wait for the RC bundle. Maps onto calltelemetry/ct-release workflow release-bundle-rc.yml. No testing, no UAT — the qualification evidence is produced by the ct-uat suites and consumed by its own gates.',
     workflow: 'release-bundle-rc.yml',
     repo: 'ct-release',
-    inputs: ['mode', 'target_branch', 'source_repository', 'source_sha', 'release_line', 'version', 'train', 'alias_of', 'skip_component_releases', 'dispatch_ova'],
+    // `confirm` is declared so the dispatch gate (index.ts) can require
+    // confirm="DISPATCH" without validateInputs rejecting it as unknown; it is
+    // never required here — dispatch mode validates its value, the other modes
+    // ignore it.
+    inputs: ['mode', 'target_branch', 'source_repository', 'source_sha', 'release_line', 'version', 'train', 'alias_of', 'skip_component_releases', 'dispatch_ova', 'confirm'],
     required: ['mode', 'target_branch', 'source_repository', 'source_sha', 'release_line'],
   },
   {
